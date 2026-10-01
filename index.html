@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ajedrez Online Gratis - Supabase</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.css">
+    <style>
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #2c3e50;
+            color: #ecf0f1;
+        }
+        #board { width: 400px; max-width: 95vw; margin: 20px 0; }
+        #status { margin-top: 20px; font-weight: bold; font-size: 1.2em; text-align: center; min-height: 2em; }
+        #share-container { margin-bottom: 20px; text-align: center; }
+        button { padding: 12px 24px; font-size: 1em; cursor: pointer; background-color: #3498db; color: white; border: none; border-radius: 6px; transition: background-color 0.2s; }
+        button:hover { background-color: #2980b9; }
+        #link-partida a { color: #1abc9c; word-break: break-all; display: block; margin-top: 10px; }
+        .info-panel { text-align: center; padding: 15px; background-color: rgba(0,0,0,0.2); border-radius: 8px; max-width: 600px; width: 90%; }
+    </style>
+</head>
+<body>
+
+    <div class="info-panel">
+        <div id="share-container">
+            <button id="btn-crear">Crear Nueva Partida</button>
+            <p id="link-partida"></p>
+        </div>
+        <div id="board"></div>
+        <div id="status">Crea o únete a una partida para empezar</div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.js"></script>
+    
+    <!-- Supabase SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    
+    <script>
+        // ============================================================
+        // 1. CONFIGURACIÓN DE SUPABASE
+        // ============================================================
+        const supabaseUrl = 'TU_PROYECTO_SUPABASE_URL';
+        const supabaseAnonKey = 'TU_PROYECTO_ANON_KEY';
+        const supabase = supabase.createClient(supabaseUrl, supabaseAnonKey);
+
+        // ============================================================
+        // 2. VARIABLES GLOBALES Y ESTADO DEL JUEGO
+        // ============================================================
+        let game = new Chess();
+        let board = null;
+        let roomId = new URLSearchParams(window.location.search).get('room');
+        let playerColor = 'w'; // 'w' = blancas, 'b' = negras
+        let isGameReady = false;
+        const boardElement = document.getElementById('board');
+        const statusElement = document.getElementById('status');
+        const shareContainer = document.getElementById('share-container');
+        const linkPartidaElement = document.getElementById('link-partida');
+
+        // ============================================================
+        // 3. INICIALIZACIÓN DEL TABLERO
+        // ============================================================
+        function initBoard() {
+            board = Chessboard('board', {
+                draggable: true,
+                position: 'start',
+                orientation: playerColor === 'w' ? 'white' : 'black',
+                onDragStart: onDragStart,
+                onDrop: onDrop,
+                onSnapEnd: onSnapEnd,
+                pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png'
+            });
+        }
+
+        // ============================================================
+        // 4. LÓGICA DE SALA Y SINCRONIZACIÓN SUPABASE
+        // ============================================================
+        function setupRoom() {
+            if (roomId) {
+                // El jugador 2 entra a una sala existente
+                playerColor = 'b';
+                shareContainer.style.display = 'none';
+                statusElement.innerText = 'Conectado a la sala: ' + roomId + '. Esperando al creador...';
+                listenToRoom(roomId);
+            } else {
+                // El jugador 1 puede crear una sala
+                document.getElementById('btn-crear').addEventListener('click', crearPartida);
+                statusElement.innerText = 'Pulsa "Crear Nueva Partida" para empezar.';
+            }
+        }
+
+        function crearPartida() {
+            roomId = Math.random().toString(36).substring(2, 7).toUpperCase();
+            const gameLink = window.location.origin + window.location.pathname + '?room=' + roomId;
+            
+            linkPartidaElement.innerHTML = `Comparte este enlace para jugar: <a href="${gameLink}" target="_blank">${gameLink}</a>`;
+            
+            // Guarda el estado inicial en Supabase
+            supabase.from('partidas').insert({
+                id: roomId,
+                fen: game.fen(),
+                turno: 'w',
+                creador: 'w'
+            }).then(({ data, error }) => {
+                if (error) {
+                    console.error("Error al crear la partida:", error);
+                    statusElement.innerText = 'Error al crear la partida.';
+                    return;
+                }
+                statusElement.innerText = 'Partida creada. Esperando oponente...';
+                listenToRoom(roomId);
+            });
+        }
+
+        function listenToRoom(id) {
+            supabase.from('partidas').on('*', { event: '*', schema: 'public', filter: 'id=eq.' + id }, (payload) => {
+                const data = payload.newrow;
+                if (data) {
+                    if (game.fen() !== data.fen) {
+                        game.load(data.fen);
+                        board.position(data.fen);
+                        actualizarEstado();
+                    }
+                    if (!isGameReady) {
+                        isGameReady = true;
+                        actualizarEstado();
+                    }
+                }
+            }).subscribe();
+        }
+
+        // ============================================================
+        // 5. CONTROLADORES DE MOVIMIENTO (CHESS.JS)
+        // ============================================================
+        function onDragStart(source, piece, position, orientation) {
+            if (game.game_over() || !isGameReady) return false;
+            if ((game.turn() === 'w' && playerColor === 'b') || (game.turn() === 'b' && playerColor === 'w')) {
+                return false;
+            }
+            if ((game.turn() === 'w' && piece.search(/^b/) !== -1) || (game.turn() === 'b' && piece.search(/^w/) !== -1)) {
+                return false;
+            }
+        }
+
+        function onDrop(source, target) {
+            let move = game.move({
+                from: source,
+                to: target,
+                promotion: 'q'
+            });
+
+            if (move === null) return 'snapback';
+
+            if (roomId) {
+                supabase.from('partidas').update({
+                    fen: game.fen(),
+                    turno: game.turn()
+                }).eq('id', roomId).catch(error => {
+                    console.error("Error al enviar movimiento:", error);
+                });
+            }
+            actualizarEstado();
+        }
+
+        function onSnapEnd() {
+            board.position(game.fen());
+        }
+
+        // ============================================================
+        // 6. ACTUALIZACIÓN DEL ESTADO
+        // ============================================================
+        function actualizarEstado() {
+            let statusText = '';
+            let elTurno = (game.turn() === 'w') ? 'Blancas' : 'Negras';
+
+            if (game.in_checkmate()) {
+                statusText = '¡Jaque Mate! Ganan las ' + (game.turn() === 'w' ? 'Negras' : 'Blancas');
+            } else if (game.in_draw()) {
+                statusText = 'Tablas (Empate).';
+            } else if (game.in_stalemate()) {
+                statusText = 'Rey ahogado. Tablas.';
+            } else {
+                statusText = 'Turno de las ' + elTurno;
+                if (game.in_check()) {
+                    statusText += ' ¡Jaque!';
+                }
+                if (!isGameReady) {
+                    statusText = 'Esperando a que se una otro jugador...';
+                }
+            }
+            statusElement.innerText = statusText;
+        }
+
+        // ============================================================
+        // 7. INICIO DE LA APLICACIÓN
+        // ============================================================
+        initBoard();
+        setupRoom();
+    </script>
+</body>
+</html>
