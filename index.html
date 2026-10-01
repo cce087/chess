@@ -51,7 +51,7 @@
         // ============================================================
         const supabaseUrl = 'TU_PROYECTO_SUPABASE_URL';
         const supabaseAnonKey = 'TU_PROYECTO_ANON_KEY';
-        const supabase = supabase.createClient(supabaseUrl, supabaseAnonKey);
+        const supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
 
         // ============================================================
         // 2. VARIABLES GLOBALES Y ESTADO DEL JUEGO
@@ -98,44 +98,55 @@
             }
         }
 
-        function crearPartida() {
+        async function crearPartida() {
             roomId = Math.random().toString(36).substring(2, 7).toUpperCase();
             const gameLink = window.location.origin + window.location.pathname + '?room=' + roomId;
-            
+
             linkPartidaElement.innerHTML = `Comparte este enlace para jugar: <a href="${gameLink}" target="_blank">${gameLink}</a>`;
-            
+
             // Guarda el estado inicial en Supabase
-            supabase.from('partidas').insert({
+            const { error } = await supabaseClient.from('partidas').insert({
                 id: roomId,
                 fen: game.fen(),
                 turno: 'w',
                 creador: 'w'
-            }).then(({ data, error }) => {
-                if (error) {
-                    console.error("Error al crear la partida:", error);
-                    statusElement.innerText = 'Error al crear la partida.';
-                    return;
-                }
-                statusElement.innerText = 'Partida creada. Esperando oponente...';
-                listenToRoom(roomId);
             });
+            if (error) {
+                console.error("Error al crear la partida:", error);
+                statusElement.innerText = 'Error al crear la partida. Revisa consola (F12).';
+                return;
+            }
+            isGameReady = true;
+            statusElement.innerText = 'Partida creada. Esperando oponente...';
+            listenToRoom(roomId);
         }
 
-        function listenToRoom(id) {
-            supabase.from('partidas').on('*', { event: '*', schema: 'public', filter: 'id=eq.' + id }, (payload) => {
-                const data = payload.newrow;
-                if (data) {
-                    if (game.fen() !== data.fen) {
-                        game.load(data.fen);
-                        board.position(data.fen);
+        async function listenToRoom(id) {
+            // Carga estado actual (por si invitado entra tarde)
+            const { data, error } = await supabaseClient.from('partidas').select('*').eq('id', id).single();
+            if (error) {
+                console.error("Error al cargar la sala:", error);
+                statusElement.innerText = 'Sala no encontrada. Revisa enlace.';
+                return;
+            }
+            if (data && game.fen() !== data.fen) {
+                game.load(data.fen);
+                board.position(data.fen);
+            }
+            isGameReady = true;
+            actualizarEstado();
+
+            // Suscripción tiempo real (SDK v2)
+            supabaseClient.channel('room-' + id)
+                .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'partidas', filter: 'id=eq.' + id }, (payload) => {
+                    const row = payload.new;
+                    if (row && game.fen() !== row.fen) {
+                        game.load(row.fen);
+                        board.position(row.fen);
                         actualizarEstado();
                     }
-                    if (!isGameReady) {
-                        isGameReady = true;
-                        actualizarEstado();
-                    }
-                }
-            }).subscribe();
+                })
+                .subscribe();
         }
 
         // ============================================================
@@ -161,11 +172,11 @@
             if (move === null) return 'snapback';
 
             if (roomId) {
-                supabase.from('partidas').update({
+                supabaseClient.from('partidas').update({
                     fen: game.fen(),
                     turno: game.turn()
-                }).eq('id', roomId).catch(error => {
-                    console.error("Error al enviar movimiento:", error);
+                }).eq('id', roomId).then(({ error }) => {
+                    if (error) console.error("Error al enviar movimiento:", error);
                 });
             }
             actualizarEstado();
@@ -203,6 +214,7 @@
         // ============================================================
         // 7. INICIO DE LA APLICACIÓN
         // ============================================================
+        if (roomId) playerColor = 'b'; // color antes de dibujar tablero
         initBoard();
         setupRoom();
     </script>
