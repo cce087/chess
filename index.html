@@ -24,6 +24,9 @@
         #board .sq-selected { box-shadow: inset 0 0 0 4px #f1c40f !important; }
         .captured { min-height: 2.2em; font-size: 1.6em; letter-spacing: 2px; text-align: center; background-color: rgba(0,0,0,0.25); border-radius: 6px; padding: 4px 8px; margin: 6px 0; }
         .captured small { display: block; font-size: 0.45em; letter-spacing: 1px; color: #bdc3c7; }
+        .captured img { height: 1.4em; vertical-align: middle; margin: 0 1px; }
+        .player-label { font-weight: bold; margin: 6px 0; font-size: 1.05em; }
+        select { padding: 10px; font-size: 1em; border-radius: 6px; margin: 4px; }
         #status { margin-top: 16px; font-weight: bold; font-size: 1.2em; text-align: center; min-height: 2em; }
         #share-container { margin-bottom: 16px; text-align: center; }
         button { padding: 12px 24px; font-size: 1em; cursor: pointer; background-color: #3498db; color: white; border: none; border-radius: 6px; transition: background-color 0.2s; margin: 4px; }
@@ -44,12 +47,20 @@
     <div class="info-panel">
         <div id="share-container">
             <button id="btn-crear">Crear Nueva Partida</button>
+            <button id="btn-bot">Jugar contra máquina</button>
+            <select id="sel-dif">
+                <option value="bajo">Nivel: bajo</option>
+                <option value="medio">Nivel: medio</option>
+                <option value="alto">Nivel: alto</option>
+            </select>
             <p id="link-partida"></p>
         </div>
         <div class="board-wrap">
-            <div id="captured-top" class="captured"><small>BLANCAS COMIDAS</small><span></span></div>
+            <div id="label-top" class="player-label"></div>
+            <div id="captured-top" class="captured"><small>BLANCAS COMIDAS</small><span>—</span></div>
             <div id="board"></div>
-            <div id="captured-bottom" class="captured"><small>NEGRAS COMIDAS</small><span></span></div>
+            <div id="captured-bottom" class="captured"><small>NEGRAS COMIDAS</small><span>—</span></div>
+            <div id="label-bottom" class="player-label"></div>
         </div>
         <div id="status">Crea o únete a una partida para empezar</div>
         <div id="save-container" style="display:none;">
@@ -79,8 +90,8 @@
         // ============================================================
         // 1. CONFIGURACIÓN DE SUPABASE
         // ============================================================
-        const supabaseUrl = 'https://gzicqacsfesjkibnawlz.supabase.co';
-        const supabaseAnonKey = 'sb_publishable_LBakt8LzdTzAzRox4WJLbQ_t_U9VaGx';
+        const supabaseUrl = 'TU_PROYECTO_SUPABASE_URL';
+        const supabaseAnonKey = 'TU_PROYECTO_ANON_KEY';
         const supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
 
         // ============================================================
@@ -96,10 +107,14 @@
         let replayMoves = [];
         let replayIndex = 0;
         let replayGame = new Chess();
-        const PIECE_GLYPH = {
-            w: { p: '♙', n: '♘', b: '♗', r: '♖', q: '♕' },
-            b: { p: '♟', n: '♞', b: '♝', r: '♜', q: '♛' }
-        };
+        let nombreW = '';
+        let nombreB = '';
+        let botMode = false;
+        let botLevel = 'bajo';
+        let engine = null;
+        let engineReady = false;
+        const PIECE_IMG = 'https://chessboardjs.com/img/chesspieces/wikipedia/{c}{t}.png';
+        const PIECE_VALUE = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
         const START_COUNT = { p: 8, n: 2, b: 2, r: 2, q: 1, k: 1 };
         const boardElement = document.getElementById('board');
         const statusElement = document.getElementById('status');
@@ -170,6 +185,7 @@
                 // Solo selecciona pieza propia en tu turno
                 if (piece && piece.color === playerColor && piece.color === game.turn()) {
                     selectSquare(sq);
+                    statusElement.innerText = 'Pieza ' + sq + ' seleccionada (' + nombreDe(playerColor) + '). Elige destino.';
                 }
                 return;
             }
@@ -208,6 +224,9 @@
                 });
             }
             actualizarEstado();
+            if (botMode && !game.game_over() && game.turn() !== playerColor) {
+                setTimeout(botMove, 450);
+            }
         }
 
         // ============================================================
@@ -218,16 +237,60 @@
                 // El jugador 2 entra a una sala existente
                 playerColor = 'b';
                 shareContainer.style.display = 'none';
-                statusElement.innerText = 'Conectado a la sala: ' + roomId + '. Esperando al creador...';
-                listenToRoom(roomId);
+                statusElement.innerText = 'Conectado a la sala: ' + roomId + '. Pide tu nombre...';
+                unirseAPartida(roomId).then(function (ok) {
+                    if (ok) listenToRoom(roomId);
+                });
             } else {
-                // El jugador 1 puede crear una sala
+                // El jugador 1 puede crear una sala o jugar contra máquina
                 document.getElementById('btn-crear').addEventListener('click', crearPartida);
+                document.getElementById('btn-bot').addEventListener('click', startBotMode);
                 statusElement.innerText = 'Pulsa "Crear Nueva Partida" para empezar.';
             }
         }
 
+        function pedirNombre() {
+            var guardado = '';
+            try { guardado = localStorage.getItem('ajedrez_nombre') || ''; } catch (e) {}
+            var nombre = prompt('Tu nombre:', guardado || 'Jugador');
+            if (nombre === null) return null; // canceló
+            nombre = (nombre || 'Jugador').slice(0, 20);
+            try { localStorage.setItem('ajedrez_nombre', nombre); } catch (e) {}
+            return nombre;
+        }
+
+        function nombreDe(color) {
+            if (color === 'w') return nombreW || 'Blancas';
+            return nombreB || 'Negras';
+        }
+
+        function updateLabels() {
+            // Etiquetas fijas a cada lado del tablero según orientación
+            var topColor = (playerColor === 'w') ? 'b' : 'w';
+            var botColor = (playerColor === 'w') ? 'w' : 'b';
+            document.getElementById('label-top').innerText =
+                (topColor === 'w' ? 'Blancas: ' : 'Negras: ') + nombreDe(topColor);
+            document.getElementById('label-bottom').innerText =
+                (botColor === 'w' ? 'Blancas: ' : 'Negras: ') + nombreDe(botColor);
+        }
+
+        // Aplica fila remota: FEN + nombres
+        function aplicarFila(row) {
+            if (!row) return;
+            if (row.nombre_w) nombreW = row.nombre_w;
+            if (row.nombre_b) nombreB = row.nombre_b;
+            if (game.fen() !== row.fen) {
+                game.load(row.fen);
+                clearSelection();
+                if (!replayMode) board.position(row.fen);
+            }
+            updateLabels();
+        }
+
         async function crearPartida() {
+            var nombre = pedirNombre();
+            if (nombre === null) return;
+            nombreW = nombre;
             roomId = Math.random().toString(36).substring(2, 7).toUpperCase();
             const gameLink = window.location.origin + window.location.pathname + '?room=' + roomId;
 
@@ -238,7 +301,8 @@
                 id: roomId,
                 fen: game.fen(),
                 turno: 'w',
-                creador: 'w'
+                creador: 'w',
+                nombre_w: nombreW
             });
             if (error) {
                 console.error("Error al crear la partida:", error);
@@ -246,8 +310,22 @@
                 return;
             }
             isGameReady = true;
+            updateLabels();
             statusElement.innerText = 'Partida creada. Esperando oponente...';
             listenToRoom(roomId);
+        }
+
+        async function unirseAPartida(id) {
+            var nombre = pedirNombre();
+            if (nombre === null) {
+                statusElement.innerText = 'Necesitas un nombre para unirte.';
+                return false;
+            }
+            nombreB = nombre;
+            // Registra nombre del invitado (ignora error si columna aún no existe)
+            var res = await supabaseClient.from('partidas').update({ nombre_b: nombreB }).eq('id', id);
+            if (res.error) console.error("Aviso nombre invitado:", res.error);
+            return true;
         }
 
         async function listenToRoom(id) {
@@ -258,11 +336,7 @@
                 statusElement.innerText = 'Sala no encontrada. Revisa enlace.';
                 return;
             }
-            if (data && game.fen() !== data.fen) {
-                game.load(data.fen);
-                clearSelection();
-                if (!replayMode) board.position(data.fen);
-            }
+            aplicarFila(data);
             isGameReady = true;
             actualizarEstado();
 
@@ -271,13 +345,145 @@
                 .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'partidas', filter: 'id=eq.' + id }, (payload) => {
                     const row = payload.new;
                     if (row && game.fen() !== row.fen) {
-                        game.load(row.fen);
-                        clearSelection();
-                        if (!replayMode) board.position(row.fen);
+                        aplicarFila(row);
+                        actualizarEstado();
+                    } else if (row) {
+                        aplicarFila(row);
                         actualizarEstado();
                     }
                 })
                 .subscribe();
+        }
+
+        // ============================================================
+        // 4b. MODO CONTRA MÁQUINA
+        // ============================================================
+        function startBotMode() {
+            var nombre = pedirNombre();
+            if (nombre === null) return;
+            botMode = true;
+            roomId = null;
+            playerColor = 'w';
+            botLevel = document.getElementById('sel-dif').value;
+            nombreW = nombre;
+            nombreB = 'Máquina (' + botLevel + ')';
+            game.reset();
+            board.orientation('white');
+            board.position('start');
+            clearSelection();
+            shareContainer.style.display = 'none';
+            isGameReady = true;
+            updateLabels();
+            actualizarEstado();
+            if (botLevel === 'alto') ensureEngine();
+        }
+
+        function botMove() {
+            if (!botMode || replayMode || game.game_over()) return;
+            if (game.turn() === playerColor) return;
+            if (botLevel === 'alto' && engineReady) {
+                requestEngineMove();
+                return;
+            }
+            var moves = game.moves({ verbose: true });
+            if (!moves.length) return;
+            var chosen = (botLevel === 'medio') ? greedyMove(moves) : moves[Math.floor(Math.random() * moves.length)];
+            game.move({ from: chosen.from, to: chosen.to, promotion: chosen.promotion || 'q' });
+            board.position(game.fen());
+            actualizarEstado();
+        }
+
+        function greedyMove(moves) {
+            var best = null;
+            var bestScore = -Infinity;
+            moves.forEach(function (m) {
+                var score = Math.random() * 0.6; // desempate aleatorio
+                if (m.captured) score += 10 * (PIECE_VALUE[m.captured] || 0);
+                if (m.promotion) score += 8;
+                if (m.san && m.san.indexOf('#') !== -1) score += 100;
+                else if (m.san && m.san.indexOf('+') !== -1) score += 1.5;
+                if (score > bestScore) { bestScore = score; best = m; }
+            });
+            return best || moves[Math.floor(Math.random() * moves.length)];
+        }
+
+        function ensureEngine(cb) {
+            if (engine) { if (cb) cb(engineReady); return; }
+            if (typeof STOCKFISH === 'undefined') {
+                var s = document.createElement('script');
+                s.src = 'https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js';
+                s.onload = function () { initEngine(cb); };
+                s.onerror = function () {
+                    console.error('Stockfish CDN falló, uso nivel medio.');
+                    botLevel = 'medio';
+                    nombreB = 'Máquina (medio)';
+                    updateLabels();
+                    if (cb) cb(false);
+                };
+                document.head.appendChild(s);
+            } else {
+                initEngine(cb);
+            }
+        }
+
+        function initEngine(cb) {
+            try {
+                engine = STOCKFISH();
+                engine.onmessage = onEngineMsg;
+                engine.postMessage('uci');
+                var check = setInterval(function () {
+                    if (engineReady) { clearInterval(check); if (cb) cb(true); }
+                }, 200);
+                setTimeout(function () { clearInterval(check); if (cb && !engineReady) cb(false); }, 8000);
+            } catch (e) {
+                console.error('No arranca Stockfish:', e);
+                botLevel = 'medio';
+                if (cb) cb(false);
+            }
+        }
+
+        function onEngineMsg(line) {
+            var msg = (typeof line === 'string') ? line : (line && line.data);
+            if (!msg) return;
+            if (msg.indexOf('uciok') !== -1) {
+                engine.postMessage('setoption name Skill Level value 12');
+                engineReady = true;
+                return;
+            }
+            if (msg.indexOf('bestmove') === 0) {
+                var parts = msg.split(' ');
+                var uci = parts[1];
+                if (!uci || uci === '(none)') return;
+                var ok = game.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci.slice(4, 5) || 'q' });
+                if (ok) {
+                    board.position(game.fen());
+                    actualizarEstado();
+                }
+            }
+        }
+
+        function requestEngineMove() {
+            statusElement.innerText = 'Máquina pensando...';
+            try {
+                engine.postMessage('position fen ' + game.fen());
+                engine.postMessage('go depth 12');
+                setTimeout(function () {
+                    // Si motor no responde, juega glotón
+                    if (botMode && !game.game_over() && game.turn() !== playerColor) {
+                        var moves = game.moves({ verbose: true });
+                        if (moves.length && statusElement.innerText === 'Máquina pensando...') {
+                            var c = greedyMove(moves);
+                            game.move({ from: c.from, to: c.to, promotion: c.promotion || 'q' });
+                            board.position(game.fen());
+                            actualizarEstado();
+                        }
+                    }
+                }, 12000);
+            } catch (e) {
+                console.error('Motor falló:', e);
+                engineReady = false;
+                botMove();
+            }
         }
 
         // ============================================================
@@ -335,8 +541,12 @@
         }
 
         // ============================================================
-        // 6b. PIEZAS CAPTURADAS
+        // 6b. PIEZAS CAPTURADAS (imágenes color exacto)
         // ============================================================
+        function pieceImg(color, type) {
+            return '<img src="' + PIECE_IMG.replace('{c}', color).replace('{t}', type.toUpperCase()) + '" alt="">';
+        }
+
         function renderCaptured() {
             var present = { w: { p: 0, n: 0, b: 0, r: 0, q: 0, k: 0 }, b: { p: 0, n: 0, b: 0, r: 0, q: 0, k: 0 } };
             game.board().forEach(function (row) {
@@ -349,11 +559,11 @@
             ['q', 'r', 'b', 'n', 'p'].forEach(function (t) {
                 var mw = START_COUNT[t] - present.w[t];
                 var mb = START_COUNT[t] - present.b[t];
-                for (var i = 0; i < mw; i++) eatenWhite += PIECE_GLYPH.w[t];
-                for (var j = 0; j < mb; j++) eatenBlack += PIECE_GLYPH.b[t];
+                for (var i = 0; i < mw; i++) eatenWhite += pieceImg('w', t);
+                for (var j = 0; j < mb; j++) eatenBlack += pieceImg('b', t);
             });
-            document.querySelector('#captured-top span').innerText = eatenWhite || '—';
-            document.querySelector('#captured-bottom span').innerText = eatenBlack || '—';
+            document.querySelector('#captured-top span').innerHTML = eatenWhite || '—';
+            document.querySelector('#captured-bottom span').innerHTML = eatenBlack || '—';
         }
 
         // ============================================================
