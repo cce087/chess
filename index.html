@@ -11,19 +11,32 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
+            justify-content: flex-start;
             min-height: 100vh;
             margin: 0;
+            padding: 24px 12px;
             background-color: #2c3e50;
             color: #ecf0f1;
+            box-sizing: border-box;
         }
-        #board { width: 400px; max-width: 95vw; margin: 20px 0; }
-        #status { margin-top: 20px; font-weight: bold; font-size: 1.2em; text-align: center; min-height: 2em; }
-        #share-container { margin-bottom: 20px; text-align: center; }
-        button { padding: 12px 24px; font-size: 1em; cursor: pointer; background-color: #3498db; color: white; border: none; border-radius: 6px; transition: background-color 0.2s; }
+        .board-wrap { width: 600px; max-width: 95vw; margin: 0 auto; }
+        #board { width: 100%; margin: 8px 0; }
+        #board .sq-selected { box-shadow: inset 0 0 0 4px #f1c40f !important; }
+        .captured { min-height: 2.2em; font-size: 1.6em; letter-spacing: 2px; text-align: center; background-color: rgba(0,0,0,0.25); border-radius: 6px; padding: 4px 8px; margin: 6px 0; }
+        .captured small { display: block; font-size: 0.45em; letter-spacing: 1px; color: #bdc3c7; }
+        #status { margin-top: 16px; font-weight: bold; font-size: 1.2em; text-align: center; min-height: 2em; }
+        #share-container { margin-bottom: 16px; text-align: center; }
+        button { padding: 12px 24px; font-size: 1em; cursor: pointer; background-color: #3498db; color: white; border: none; border-radius: 6px; transition: background-color 0.2s; margin: 4px; }
         button:hover { background-color: #2980b9; }
+        button:disabled { background-color: #7f8c8d; cursor: not-allowed; }
+        button.secondary { background-color: #16a085; }
+        button.secondary:hover { background-color: #138d75; }
         #link-partida a { color: #1abc9c; word-break: break-all; display: block; margin-top: 10px; }
-        .info-panel { text-align: center; padding: 15px; background-color: rgba(0,0,0,0.2); border-radius: 8px; max-width: 600px; width: 90%; }
+        .info-panel { text-align: center; padding: 20px; background-color: rgba(0,0,0,0.2); border-radius: 8px; max-width: 780px; width: 95%; }
+        #save-container, #replay-bar, #saved-list { margin-top: 14px; text-align: center; }
+        #replay-bar { display: none; }
+        #replay-count { font-weight: bold; margin: 0 8px; }
+        #saved-list button { display: block; margin: 6px auto; font-size: 0.9em; padding: 8px 16px; }
     </style>
 </head>
 <body>
@@ -33,8 +46,25 @@
             <button id="btn-crear">Crear Nueva Partida</button>
             <p id="link-partida"></p>
         </div>
-        <div id="board"></div>
+        <div class="board-wrap">
+            <div id="captured-top" class="captured"><small>BLANCAS COMIDAS</small><span></span></div>
+            <div id="board"></div>
+            <div id="captured-bottom" class="captured"><small>NEGRAS COMIDAS</small><span></span></div>
+        </div>
         <div id="status">Crea o únete a una partida para empezar</div>
+        <div id="save-container" style="display:none;">
+            <button id="btn-save" class="secondary">Guardar partida (PGN)</button>
+            <button id="btn-replay" class="secondary">Ver repetición</button>
+        </div>
+        <div id="replay-bar">
+            <button id="btn-first" title="Inicio">|&lt;</button>
+            <button id="btn-prev" title="Anterior">&lt;</button>
+            <span id="replay-count">Jugada 0 / 0</span>
+            <button id="btn-next" title="Siguiente">&gt;</button>
+            <button id="btn-last" title="Final">&gt;|</button>
+            <button id="btn-exit">Volver en vivo</button>
+        </div>
+        <div id="saved-list"></div>
     </div>
 
     <!-- Scripts -->
@@ -49,8 +79,8 @@
         // ============================================================
         // 1. CONFIGURACIÓN DE SUPABASE
         // ============================================================
-        const supabaseUrl = 'https://gzicqacsfesjkibnawlz.supabase.co';
-        const supabaseAnonKey = 'sb_publishable_LBakt8LzdTzAzRox4WJLbQ_t_U9VaGx';
+        const supabaseUrl = 'TU_PROYECTO_SUPABASE_URL';
+        const supabaseAnonKey = 'TU_PROYECTO_ANON_KEY';
         const supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
 
         // ============================================================
@@ -61,6 +91,16 @@
         let roomId = new URLSearchParams(window.location.search).get('room');
         let playerColor = 'w'; // 'w' = blancas, 'b' = negras
         let isGameReady = false;
+        let selectedSquare = null;
+        let replayMode = false;
+        let replayMoves = [];
+        let replayIndex = 0;
+        let replayGame = new Chess();
+        const PIECE_GLYPH = {
+            w: { p: '♙', n: '♘', b: '♗', r: '♖', q: '♕' },
+            b: { p: '♟', n: '♞', b: '♝', r: '♜', q: '♛' }
+        };
+        const START_COUNT = { p: 8, n: 2, b: 2, r: 2, q: 1, k: 1 };
         const boardElement = document.getElementById('board');
         const statusElement = document.getElementById('status');
         const shareContainer = document.getElementById('share-container');
@@ -79,6 +119,83 @@
                 onSnapEnd: onSnapEnd,
                 pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png'
             });
+            // Click-para-mover: clic origen + clic destino (delegado, compatible móvil)
+            $('#board').off('click.cb').on('click.cb', '[data-square], [class*="square-"]', function () {
+                var sq = $(this).attr('data-square');
+                if (!sq) {
+                    var m = (this.className || '').match(/square-([a-h][1-8])/);
+                    if (m) sq = m[1];
+                }
+                if (sq) handleSquareClick(sq);
+            });
+        }
+
+        function canPlay() {
+            if (replayMode || game.game_over() || !isGameReady) return false;
+            if (game.turn() !== playerColor) return false;
+            return true;
+        }
+
+        function sqEl(sq) {
+            return $('#board [data-square="' + sq + '"], #board .square-' + sq);
+        }
+
+        function clearSelection() {
+            selectedSquare = null;
+            $('#board [data-square], #board [class*="square-"]').removeClass('sq-selected');
+        }
+
+        function selectSquare(sq) {
+            clearSelection();
+            selectedSquare = sq;
+            sqEl(sq).addClass('sq-selected');
+        }
+
+        function handleSquareClick(sq) {
+            if (!canPlay()) return;
+            var piece = game.get(sq);
+            if (selectedSquare === null) {
+                // Solo selecciona pieza propia en tu turno
+                if (piece && piece.color === playerColor && piece.color === game.turn()) {
+                    selectSquare(sq);
+                }
+                return;
+            }
+            if (selectedSquare === sq) {
+                clearSelection();
+                return;
+            }
+            // Si clica otra pieza propia, cambia selección
+            if (piece && piece.color === playerColor && piece.color === game.turn()) {
+                selectSquare(sq);
+                return;
+            }
+            var ok = tryMove(selectedSquare, sq);
+            clearSelection();
+            if (!ok) {
+                statusElement.innerText = 'Movimiento no legal. Elige otra casilla.';
+            }
+        }
+
+        // Ejecuta movimiento local y sincroniza. Devuelve true si legal.
+        function tryMove(from, to) {
+            var move = game.move({ from: from, to: to, promotion: 'q' });
+            if (move === null) return false;
+            board.position(game.fen());
+            sendMove();
+            return true;
+        }
+
+        function sendMove() {
+            if (roomId) {
+                supabaseClient.from('partidas').update({
+                    fen: game.fen(),
+                    turno: game.turn()
+                }).eq('id', roomId).then(function (res) {
+                    if (res.error) console.error("Error al enviar movimiento:", res.error);
+                });
+            }
+            actualizarEstado();
         }
 
         // ============================================================
@@ -131,7 +248,8 @@
             }
             if (data && game.fen() !== data.fen) {
                 game.load(data.fen);
-                board.position(data.fen);
+                clearSelection();
+                if (!replayMode) board.position(data.fen);
             }
             isGameReady = true;
             actualizarEstado();
@@ -142,7 +260,8 @@
                     const row = payload.new;
                     if (row && game.fen() !== row.fen) {
                         game.load(row.fen);
-                        board.position(row.fen);
+                        clearSelection();
+                        if (!replayMode) board.position(row.fen);
                         actualizarEstado();
                     }
                 })
@@ -153,33 +272,21 @@
         // 5. CONTROLADORES DE MOVIMIENTO (CHESS.JS)
         // ============================================================
         function onDragStart(source, piece, position, orientation) {
-            if (game.game_over() || !isGameReady) return false;
-            if ((game.turn() === 'w' && playerColor === 'b') || (game.turn() === 'b' && playerColor === 'w')) {
-                return false;
-            }
+            if (!canPlay()) return false;
+
+            // Evitar que el jugador mueva las piezas del color contrario
             if ((game.turn() === 'w' && piece.search(/^b/) !== -1) || (game.turn() === 'b' && piece.search(/^w/) !== -1)) {
                 return false;
             }
         }
 
         function onDrop(source, target) {
-            let move = game.move({
-                from: source,
-                to: target,
-                promotion: 'q'
-            });
+            // Intentar realizar el movimiento usando chess.js
+            var ok = tryMove(source, target);
 
-            if (move === null) return 'snapback';
-
-            if (roomId) {
-                supabaseClient.from('partidas').update({
-                    fen: game.fen(),
-                    turno: game.turn()
-                }).eq('id', roomId).then(({ error }) => {
-                    if (error) console.error("Error al enviar movimiento:", error);
-                });
-            }
-            actualizarEstado();
+            // Si el movimiento no es legal, chess.js devuelve null
+            if (!ok) return 'snapback';
+            clearSelection();
         }
 
         function onSnapEnd() {
@@ -209,6 +316,133 @@
                 }
             }
             statusElement.innerText = statusText;
+            renderCaptured();
+            var over = game.game_over();
+            document.getElementById('save-container').style.display = over ? 'block' : 'none';
+            if (!over && replayMode) exitReplay();
+        }
+
+        // ============================================================
+        // 6b. PIEZAS CAPTURADAS
+        // ============================================================
+        function renderCaptured() {
+            var present = { w: { p: 0, n: 0, b: 0, r: 0, q: 0, k: 0 }, b: { p: 0, n: 0, b: 0, r: 0, q: 0, k: 0 } };
+            game.board().forEach(function (row) {
+                row.forEach(function (sq) {
+                    if (sq) present[sq.color][sq.type]++;
+                });
+            });
+            var eatenWhite = '';
+            var eatenBlack = '';
+            ['q', 'r', 'b', 'n', 'p'].forEach(function (t) {
+                var mw = START_COUNT[t] - present.w[t];
+                var mb = START_COUNT[t] - present.b[t];
+                for (var i = 0; i < mw; i++) eatenWhite += PIECE_GLYPH.w[t];
+                for (var j = 0; j < mb; j++) eatenBlack += PIECE_GLYPH.b[t];
+            });
+            document.querySelector('#captured-top span').innerText = eatenWhite || '—';
+            document.querySelector('#captured-bottom span').innerText = eatenBlack || '—';
+        }
+
+        // ============================================================
+        // 6c. GUARDAR PARTIDA + REPETICIÓN JUGADA A JUGADA
+        // ============================================================
+        function gameResult() {
+            if (game.in_checkmate()) return game.turn() === 'w' ? '0-1 Ganan negras' : '1-0 Ganan blancas';
+            if (game.in_draw() || game.in_stalemate()) return 'Tablas 1/2-1/2';
+            return 'En curso';
+        }
+
+        function guardarPartida() {
+            var pgn = game.pgn();
+            if (!pgn) {
+                statusElement.innerText = 'Nada que guardar: sin jugadas.';
+                return;
+            }
+            var fecha = new Date().toLocaleString('es-ES');
+            var registro = {
+                id: Date.now(),
+                sala: roomId || 'local',
+                fecha: fecha,
+                resultado: gameResult(),
+                pgn: pgn
+            };
+            var guardadas = [];
+            try {
+                guardadas = JSON.parse(localStorage.getItem('ajedrez_guardadas') || '[]');
+            } catch (e) { guardadas = []; }
+            guardadas.push(registro);
+            localStorage.setItem('ajedrez_guardadas', JSON.stringify(guardadas));
+            // Descarga archivo .pgn
+            var blob = new Blob([pgn], { type: 'text/plain;charset=utf-8' });
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'partida-' + registro.sala + '.pgn';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            renderSavedList();
+            statusElement.innerText = 'Partida guardada (' + registro.resultado + '). Archivo PGN descargado.';
+        }
+
+        function renderSavedList() {
+            var cont = document.getElementById('saved-list');
+            var guardadas = [];
+            try {
+                guardadas = JSON.parse(localStorage.getItem('ajedrez_guardadas') || '[]');
+            } catch (e) { guardadas = []; }
+            cont.innerHTML = '';
+            if (!guardadas.length) return;
+            var title = document.createElement('p');
+            title.innerText = 'Partidas guardadas en este navegador:';
+            cont.appendChild(title);
+            guardadas.slice().reverse().forEach(function (g) {
+                var b = document.createElement('button');
+                b.innerText = 'Repetir ' + g.fecha + ' (' + g.resultado + ')';
+                b.addEventListener('click', function () { enterReplayFromPgn(g.pgn); });
+                cont.appendChild(b);
+            });
+        }
+
+        function enterReplay(moves) {
+            replayMode = true;
+            replayMoves = moves;
+            replayIndex = moves.length;
+            clearSelection();
+            drawReplay();
+            document.getElementById('replay-bar').style.display = 'block';
+            document.getElementById('save-container').style.display = 'none';
+        }
+
+        function enterReplayFromPgn(pgn) {
+            var tmp = new Chess();
+            if (!tmp.load_pgn(pgn)) {
+                statusElement.innerText = 'PGN inválido, no se puede repetir.';
+                return;
+            }
+            enterReplay(tmp.history({ verbose: true }));
+        }
+
+        function drawReplay() {
+            replayGame = new Chess();
+            for (var i = 0; i < replayIndex; i++) {
+                var m = replayMoves[i];
+                replayGame.move({ from: m.from, to: m.to, promotion: m.promotion || 'q' });
+            }
+            board.position(replayGame.fen());
+            document.getElementById('replay-count').innerText = 'Jugada ' + replayIndex + ' / ' + replayMoves.length;
+        }
+
+        function stepReplay(d) {
+            replayIndex = Math.max(0, Math.min(replayMoves.length, replayIndex + d));
+            drawReplay();
+        }
+
+        function exitReplay() {
+            replayMode = false;
+            document.getElementById('replay-bar').style.display = 'none';
+            board.position(game.fen());
+            actualizarEstado();
         }
 
         // ============================================================
@@ -217,6 +451,17 @@
         if (roomId) playerColor = 'b'; // color antes de dibujar tablero
         initBoard();
         setupRoom();
+        renderCaptured();
+        renderSavedList();
+        document.getElementById('btn-save').addEventListener('click', guardarPartida);
+        document.getElementById('btn-replay').addEventListener('click', function () {
+            enterReplay(game.history({ verbose: true }));
+        });
+        document.getElementById('btn-first').addEventListener('click', function () { replayIndex = 0; drawReplay(); });
+        document.getElementById('btn-prev').addEventListener('click', function () { stepReplay(-1); });
+        document.getElementById('btn-next').addEventListener('click', function () { stepReplay(1); });
+        document.getElementById('btn-last').addEventListener('click', function () { replayIndex = replayMoves.length; drawReplay(); });
+        document.getElementById('btn-exit').addEventListener('click', exitReplay);
     </script>
 </body>
 </html>
