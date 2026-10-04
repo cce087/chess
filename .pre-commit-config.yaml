@@ -1,0 +1,15 @@
+repos:
+  - repo: https://github.com/trufflesecurity/trufflehog
+    rev: v3.97.9
+    hooks:
+      - id: trufflehog
+        entry: trufflehog filesystem --no-verification --fail
+        language: system
+        types: [file]
+  - repo: https://github.com/returntocorp/semgrep
+    rev: v1.179.0
+    hooks:
+      - id: semgrep
+        entry: semgrep scan --config=auto --error
+        language: system
+        types: [file]
